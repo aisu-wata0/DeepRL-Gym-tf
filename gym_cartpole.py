@@ -310,17 +310,11 @@ class PolicyNetTF(PolicyNet):
     def step(self, current_q_values, target):
         target = np.expand_dims(target, 1)
         # mse
-        mse = tf.keras.losses.MSE(
-            target,
-            current_q_values
-        )
-        # loss = F.mse_loss(current_q_values, )
-        loss = ((current_q_values-target)**2).mean()
-        print("mse", mse)
-        print("loss", loss)
-        print("loss.numpy().mean()", loss.numpy().mean())
+        # loss = ((current_q_values-target)**2)
+        loss = tf.keras.losses.MSE(target, current_q_values)
+        loss_mean = tf.math.reduce_mean(loss)
 
-        self.loss_history.append(loss.numpy().mean())
+        self.loss_history.append(loss_mean)
         grads = self.tape.gradient(loss, self.model.trainable_variables)
         optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
 
@@ -353,14 +347,18 @@ class PolicyNetTF(PolicyNet):
 
     def get_next(self, target_net, next_states):
         # only calculate state qvals for non_final_states
-        non_final_state_idxs = non_final_state_idxs(next_states)
-        non_final_states = next_states[non_final_state_idxs]
+        non_final_state_mask = PolicyNetTF.non_final_state_idxs(next_states)
+        non_final_states = next_states[non_final_state_mask]
         # Dont GradientTape this :)
         qvals = target_net(non_final_states)
 
         batch_size = next_states.shape[0]
-        next_q_values = tf.zeros(batch_size)
-        next_q_values[non_final_state_idxs] = tf.math.reduce_max(qvals, axis=1)
+        maxi = tf.math.reduce_max(qvals, axis=1)
+        # get list of indexes which should be updated
+        # https://stackoverflow.com/questions/53632837/tensorflow-assign-tensor-to-tensor-with-array-indexing
+        non_final_state_idxs = tf.where(non_final_state_mask)
+        next_q_values = tf.scatter_nd(non_final_state_idxs, maxi, [batch_size])
+
         return next_q_values
 
 #%%
@@ -406,14 +404,16 @@ em = CartPoleEnvManager()
 em.reset()
 
 #%%
-screen = em.renderArray()
 
-plt.figure()
-plt.imshow(screen)
-plt.title('Non-processed screen example')
-plt.show()
+if DEMO:
+    screen = em.renderArray()
 
-print("screen.shape", screen.shape)
+    plt.figure()
+    plt.imshow(screen)
+    plt.title('Non-processed screen example')
+    plt.show()
+
+    print("screen.shape", screen.shape)
 
 #%%
 # dummy strategy
@@ -423,50 +423,54 @@ agent = Agent(strategy, em.num_actions_available())
 
 #%%
 
-policy = PolicyNetTF(None)
-screenPr = policy.preprocess_screen(screen)
-print("screenPr.shape", screenPr.shape)
-plt.figure()
-plt.imshow(screenPr, interpolation='none')
-plt.title('Processed screen example')
-plt.show()
+if DEMO:
+    policy = PolicyNetTF(None)
+    screenPr = policy.preprocess_screen(screen)
+    print("screenPr.shape", screenPr.shape)
+    plt.figure()
+    plt.imshow(screenPr, interpolation='none')
+    plt.title('Processed screen example')
+    plt.show()
 
 
 #%%
 
-screen = em.get_state()
-
-plt.figure()
-plt.imshow(screen[0], interpolation='none')
-plt.title('Starting state example')
-plt.show()
-
-
-#%%
-
-for i in range(5):
-    em.take_action(1)
-
-screens = em.get_state()
-inputScreen = policy.get_state(screens)
-
-plt.figure()
-plt.imshow(inputScreen, interpolation='none')
-plt.title('Non starting state example')
-plt.show()
+if DEMO:
+    screen = em.get_state()
+            
+    plt.figure()
+    plt.imshow(screen[0], interpolation='none')
+    plt.title('Starting state example')
+    plt.show()
 
 
 #%%
 
-em.done = True
-screen = em.get_state()
+if DEMO:
+    for i in range(5):
+        em.take_action(1)
 
-plt.figure()
-plt.imshow(screen[0], interpolation='none')
-plt.title('Ending state example')
-plt.show()
+    screens = em.get_state()
+    inputScreen = policy.get_state(screens)
 
-em.close()
+    plt.figure()
+    plt.imshow(inputScreen, interpolation='none')
+    plt.title('Non starting state example')
+    plt.show()
+
+
+#%%
+
+if DEMO:
+    em.done = True
+    screen = em.get_state()
+
+    plt.figure()
+    plt.imshow(screen[0], interpolation='none')
+    plt.title('Ending state example')
+    plt.show()
+
+    em.close()
 
 
 #%%
@@ -496,8 +500,10 @@ def plot_moving_avg(values, moving_avg_period):
 
 
 #%%
-array = np.random.rand(300)
-plot_moving_avg(array, 100)
+
+if DEMO:
+    array = np.random.rand(300)
+    plot_moving_avg(array, 100)
 
 #%% [markdown]
 # # Start training
@@ -555,18 +561,20 @@ optimizer = hypers['optimizer'](lr=hypers['lr'])
 
 episode_durations: List[int] = []
 
-
+progressBar = tf.keras.utils.Progbar(None, stateful_metrics=['Episode', 'timestep'])
+stepsCounter = 0
 # Initialize replay memory capacity.
 # Initialize the policy network with random weights.
 # Clone the policy network, and call it the target network.
 # For each episode:
 for episode_num in range(hypers['num_episodes']):
+    progressBar.update(stepsCounter, [('Episode', episode_num)])
     # Initialize the starting state.
     em.reset()
     # get initial state
     # preprocess it as the policy uses it
     state = policy.get_state(em.get_state())
-    # For each time step:
+    # For each time step; until end of simulation:
     for timestep in count():
         # Select an action.
         # Via exploration or exploitation
@@ -595,12 +603,14 @@ for episode_num in range(hypers['num_episodes']):
             target_q_values = (next_q_values * hypers['gamma']) + rewards
             # pytorch
             policy.step(current_q_values, target_q_values)
+            stepsCounter += 1
         # If episode reached the end
         if em.done:
             # Save how many steps it took
             episode_durations.append(timestep)
             # plot the durations
             plot_moving_avg(episode_durations, 100)
+            progressBar.update(stepsCounter, [('timestep', timestep)])
             break
 
     if episode_num % hypers['target_update'] == 0:
