@@ -233,6 +233,7 @@ class PolicyNet(metaclass=abc.ABCMeta):
 class PolicyNetTF(PolicyNet):
     def __init__(self, model: tf.keras.Model):
         self.model = model
+        self.loss_history: List[float] = []
         
 
     def set_model(self, model):
@@ -317,12 +318,34 @@ class PolicyNetTF(PolicyNet):
         self.loss_history.append(loss_mean)
         grads = self.tape.gradient(loss, self.model.trainable_variables)
         optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
+        return loss_mean
 
+    def update(self, states, actions, target):
 
-    def get_current(self, policy_net, states, actions):
         with tf.GradientTape() as tape:
             # TODO:
-            output = policy_net(states, training=True)
+            tape.watch(self.model.trainable_variables)
+            output = self.model(states, training=True)
+
+            current_q_values = tf.gather(output, indices=tf.expand_dims(actions, -1), axis=1)
+
+            target = np.expand_dims(target, 1)
+            # mse
+            # loss = ((current_q_values-target)**2)
+            loss = tf.keras.losses.MSE(target, current_q_values)
+            loss_mean = tf.math.reduce_mean(loss)
+
+        self.loss_history.append(loss_mean)
+        grads = tape.gradient(loss, self.model.trainable_variables)
+        optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
+        return loss_mean
+
+
+    def get_current(self, states, actions):
+        with tf.GradientTape() as tape:
+            # TODO:
+            tape.watch(self.model.trainable_variables)
+            output = self.model(states, training=True)
 
         self.tape = tape
 
@@ -369,8 +392,6 @@ class Agent():
         self.strategy: Strategy = strategy
         self.num_actions: int = num_actions
         self.current_step: int = 0
-
-        self.loss_history: List[float] = []
 
 
     def select_action(self, state, policy: PolicyNet):
@@ -595,14 +616,15 @@ for episode_num in range(hypers['num_episodes']):
             tupleOfBatches = PolicyNetClass.extract_tensors(experiences)
             states, actions, rewards, next_states = tupleOfBatches
 
-            # These states and actions were the result of either exploration or exploitation
-            current_q_values = policy.get_current(policy_net, states, actions)
+            # # These states and actions were the result of either exploration or exploitation
+            # current_q_values = policy.get_current(states, actions)
             # These are always exploitation, the policy's best known actions
             next_q_values = policy.get_next(target_net, next_states)
             
             target_q_values = (next_q_values * hypers['gamma']) + rewards
-            # pytorch
-            policy.step(current_q_values, target_q_values)
+            # loss = policy.step(current_q_values, target_q_values)
+            loss = policy.update(states, actions, target_q_values)
+            progressBar.update(stepsCounter, [('loss', loss)])
             stepsCounter += 1
         # If episode reached the end
         if em.done:
